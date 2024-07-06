@@ -1,7 +1,7 @@
 import click
 import json
 import re
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Sequence, Optional
 
 from eth_typing import (
     BLSPubkey,
@@ -32,13 +32,13 @@ from staking_deposit.utils.constants import (
 )
 from staking_deposit.utils.crypto import SHA256
 from staking_deposit.settings import BaseChainSetting
-
+from multiprocessing import Pool
 
 #
 # Deposit
 #
 
-def verify_deposit_data_json(filefolder: str, credentials: Sequence[Credential]) -> bool:
+def verify_deposit_data_json(filefolder: str, credentials: Sequence[Credential], pool : Optional[Pool] = None) -> bool:
     """
     Validate every deposit found in the deposit-data JSON file folder.
     """
@@ -46,9 +46,16 @@ def verify_deposit_data_json(filefolder: str, credentials: Sequence[Credential])
         deposit_json = json.load(f)
         with click.progressbar(deposit_json, label=load_text(['msg_deposit_verification']),
                                show_percent=False, show_pos=True) as deposits:
-            return all([validate_deposit(deposit, credential) for deposit, credential in zip(deposits, credentials)])
+            if pool:
+                return all(pool.imap(__mp_validate_deposit, zip(deposits, credentials)))
+            else:
+                return all([validate_deposit(deposit, credential) for deposit, credential in zip(deposits, credentials)])
     return False
 
+
+def __mp_validate_deposit(args) -> bool:
+    deposit, credential = args
+    return validate_deposit(deposit, credential)
 
 def validate_deposit(deposit_data_dict: Dict[str, Any], credential: Credential) -> bool:
     '''

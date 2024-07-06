@@ -1,4 +1,7 @@
+import asyncio
 import os
+import multiprocessing as mp
+
 import click
 from enum import Enum
 import time
@@ -204,12 +207,29 @@ class Credential:
         return result_dict
 
 
+def save_signing_keystore(data):
+    credential, password, folder = data
+    return credential.save_signing_keystore(password=password, folder=folder)
+
+def build_credential(kwargs):
+    return Credential(**kwargs)
+
+def deposit_datum_dict(cred: Credential):
+    return cred.deposit_datum_dict
+
+
+def verify_keystore(item):
+    credential, filefolder, password = item
+    return credential.verify_keystore(keystore_filefolder=filefolder, password=password)
+
+
 class CredentialList:
     """
     A collection of multiple Credentials, one for each validator.
     """
-    def __init__(self, credentials: List[Credential]):
+    def __init__(self, credentials: List[Credential], pool):
         self.credentials = credentials
+        self.pool = pool
 
     @classmethod
     def from_mnemonic(cls,
@@ -220,7 +240,11 @@ class CredentialList:
                       amounts: List[int],
                       chain_setting: BaseChainSetting,
                       start_index: int,
-                      hex_eth1_withdrawal_address: Optional[HexAddress]) -> 'CredentialList':
+                      hex_eth1_withdrawal_address: Optional[HexAddress],
+                      pool : Optional[mp.Pool] = None) -> 'CredentialList':
+
+        pool = pool or mp.Pool(None)
+
         if len(amounts) != num_keys:
             raise ValueError(
                 f"The number of keys ({num_keys}) doesn't equal to the corresponding deposit amounts ({len(amounts)})."
@@ -228,20 +252,24 @@ class CredentialList:
         key_indices = range(start_index, start_index + num_keys)
         with click.progressbar(key_indices, label=load_text(['msg_key_creation']),
                                show_percent=False, show_pos=True) as indices:
-            return cls([Credential(mnemonic=mnemonic, mnemonic_password=mnemonic_password,
+            return cls(list(
+                pool.imap(build_credential, (dict(mnemonic=mnemonic, mnemonic_password=mnemonic_password,
                                    index=index, amount=amounts[index - start_index], chain_setting=chain_setting,
-                                   hex_eth1_withdrawal_address=hex_eth1_withdrawal_address)
-                        for index in indices])
+                                   hex_eth1_withdrawal_address=hex_eth1_withdrawal_address) for index in indices))
+            ),pool)
 
     def export_keystores(self, password: str, folder: str) -> List[str]:
         with click.progressbar(self.credentials, label=load_text(['msg_keystore_creation']),
                                show_percent=False, show_pos=True) as credentials:
-            return [credential.save_signing_keystore(password=password, folder=folder) for credential in credentials]
+            return list(self.pool.imap(
+                save_signing_keystore,
+                ((credential, password, folder) for credential in credentials)
+            ))
 
     def export_deposit_data_json(self, folder: str) -> str:
         with click.progressbar(self.credentials, label=load_text(['msg_depositdata_creation']),
                                show_percent=False, show_pos=True) as credentials:
-            deposit_data = [cred.deposit_datum_dict for cred in credentials]
+            deposit_data = list(self.pool.imap(deposit_datum_dict, credentials))
         filefolder = os.path.join(folder, 'deposit_data-%i.json' % time.time())
         with open(filefolder, 'w') as f:
             json.dump(deposit_data, f, default=lambda x: x.hex())
@@ -250,11 +278,13 @@ class CredentialList:
         return filefolder
 
     def verify_keystores(self, keystore_filefolders: List[str], password: str) -> bool:
+
         with click.progressbar(zip(self.credentials, keystore_filefolders),
                                label=load_text(['msg_keystore_verification']),
                                length=len(self.credentials), show_percent=False, show_pos=True) as items:
-            return all(credential.verify_keystore(keystore_filefolder=filefolder, password=password)
-                       for credential, filefolder in items)
+            return all(self.pool.imap(verify_keystore, (
+                (credential, filefolder, password) for credential, filefolder in items
+            )))
 
     def export_bls_to_execution_change_json(self, folder: str, validator_indices: Sequence[int]) -> str:
         with click.progressbar(self.credentials, label=load_text(['msg_bls_to_execution_change_creation']),
